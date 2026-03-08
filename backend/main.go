@@ -8,6 +8,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
+
 	"github.com/joho/godotenv"
 )
 
@@ -27,10 +29,39 @@ func githubContributionsHandler(w http.ResponseWriter, r *http.Request) {
 		username = "PajiiMarr"
 	}
 
-	year := r.URL.Query().Get("year")
-	if year == "" {
-		year = "2026"
+	// Parse from/to query params (expected as YYYY-MM-DD)
+	fromStr := r.URL.Query().Get("from")
+	toStr   := r.URL.Query().Get("to")
+
+	now := time.Now().UTC()
+
+	var fromTime, toTime time.Time
+
+	if fromStr != "" {
+		t, err := time.Parse("2006-01-02", fromStr)
+		if err == nil {
+			fromTime = t
+		}
 	}
+	if toStr != "" {
+		t, err := time.Parse("2006-01-02", toStr)
+		if err == nil {
+			// end of day
+			toTime = time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 0, time.UTC)
+		}
+	}
+
+	// Fallback: last 12 months
+	if fromTime.IsZero() {
+		fromTime = now.AddDate(-1, 0, 0)
+	}
+	if toTime.IsZero() {
+		toTime = now
+	}
+
+	// GitHub GraphQL requires full RFC3339 DateTime
+	fromISO := fromTime.Format(time.RFC3339)
+	toISO   := toTime.Format(time.RFC3339)
 
 	token := os.Getenv("GITHUB_TOKEN")
 	if token == "" {
@@ -41,33 +72,29 @@ func githubContributionsHandler(w http.ResponseWriter, r *http.Request) {
 	query := `
 	query($login: String!, $from: DateTime!, $to: DateTime!) {
 	  user(login: $login) {
-		contributionsCollection(from: $from, to: $to) {
-		  contributionCalendar {
-			totalContributions
-			weeks {
-			  contributionDays {
-				date
-				contributionCount
-				color
-			  }
-			}
-		  }
-		}
+	    contributionsCollection(from: $from, to: $to) {
+	      contributionCalendar {
+	        totalContributions
+	        weeks {
+	          contributionDays {
+	            date
+	            contributionCount
+	            color
+	          }
+	        }
+	      }
+	    }
 	  }
 	}
 	`
 
 	variables := map[string]interface{}{
 		"login": username,
-		"from":  fmt.Sprintf("%s-01-01T00:00:00Z", year),
-		"to":    fmt.Sprintf("%s-12-31T23:59:59Z", year),
+		"from":  fromISO,
+		"to":    toISO,
 	}
 
-	reqBody := GraphQLRequest{
-		Query:     query,
-		Variables: variables,
-	}
-
+	reqBody := GraphQLRequest{Query: query, Variables: variables}
 	jsonBody, _ := json.Marshal(reqBody)
 
 	req, err := http.NewRequest("POST", githubGraphQLEndpoint, bytes.NewBuffer(jsonBody))
@@ -75,7 +102,6 @@ func githubContributionsHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"Failed to create request"}`, http.StatusInternalServerError)
 		return
 	}
-
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 
@@ -88,16 +114,16 @@ func githubContributionsHandler(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
-
 	w.Write(body)
 }
 
 func main() {
-	http.HandleFunc("/api/github-contributions", githubContributionsHandler)
 	err := godotenv.Load()
 	if err != nil {
 		log.Println("No .env file found (skipping)")
 	}
+
+	http.HandleFunc("/api/github-contributions", githubContributionsHandler)
 
 	fmt.Println("Go server running on http://localhost:8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
